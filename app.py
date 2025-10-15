@@ -2,31 +2,59 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from tinydb import Query
 from database import usuarios_table
-from services.email_service import configurar_mail, enviar_correo
+from routes.empleados_routes import empleados
+from routes.contratos_routes import contratos
+import threading
+import smtplib
+import socket
+import time
+import logging
 import random
 import datetime
 
-# Crear la aplicación Flask
+# ------------------- CONFIGURACIÓN BÁSICA -------------------
 app = Flask(__name__)
 CORS(app)
-
-# Configurar correo
-configurar_mail(app)
-
-# Importar las rutas después de crear app
-from routes.empleados_routes import empleados
-from routes.contratos_routes import contratos
-
-# Registrar los blueprints
 app.register_blueprint(empleados)
 app.register_blueprint(contratos)
+logging.basicConfig(level=logging.INFO)
+
+# ------------------- CONFIGURACIÓN DEL CORREO -------------------
+SMTP_HOST = 'smtp.example.com'
+SMTP_PORT = 587
+SMTP_USER = 'user@example.com'
+SMTP_PASS = 'supersecret'
+FROM_EMAIL = 'no-reply@tu-dominio.com'
+
+# ------------------- FUNCIONES DE CORREO -------------------
+def send_recovery_email(correo, codigo):
+    """Envía el correo de recuperación en background con reintentos y timeout."""
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            logging.info("Intentando enviar correo a %s (intento %d)", correo, attempt)
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
+                smtp.starttls()
+                smtp.login(SMTP_USER, SMTP_PASS)
+                subject = "Recuperación de contraseña - Molino de Arroz"
+                body = f"Tu código de recuperación es: {codigo}. Este código expirará en 10 minutos."
+                msg = f"From: Molino <{FROM_EMAIL}>\r\nTo: {correo}\r\nSubject: {subject}\r\n\r\n{body}"
+                smtp.sendmail(FROM_EMAIL, [correo], msg)
+            logging.info("Correo enviado correctamente a %s", correo)
+            return True
+        except (smtplib.SMTPException, socket.timeout, ConnectionRefusedError) as e:
+            logging.exception("Error enviando correo (intento %d): %s", attempt, e)
+            time.sleep(2 ** attempt)
+        except Exception as e:
+            logging.exception("Error inesperado al enviar correo: %s", e)
+            break
+    logging.error("No se pudo enviar el correo a %s después de %d intentos", correo, max_retries)
+    return False
 
 # ------------------- RUTAS PRINCIPALES -------------------
-
 @app.route('/')
 def home():
     return {"message": "Backend SIRH del Molino de Arroz funcionando correctamente ✅"}
-
 
 # ---------- LOGIN ----------
 @app.route('/login', methods=['POST'])
@@ -42,7 +70,6 @@ def login():
         return jsonify({"message": "Login exitoso"}), 200
     return jsonify({"error": "Credenciales incorrectas"}), 401
 
-
 # ---------- RECUPERACIÓN DE CONTRASEÑA ----------
 @app.route('/recuperar', methods=['POST'])
 def recuperar():
@@ -55,7 +82,7 @@ def recuperar():
     if not user:
         return jsonify({"error": "Usuario no encontrado"}), 404
 
-    # Generar código temporal de 6 dígitos
+    # Generar código temporal de 6 dígitos y expiración
     codigo = str(random.randint(100000, 999999))
     expira_en = (datetime.datetime.now() + datetime.timedelta(minutes=10)).isoformat()
 
@@ -64,16 +91,11 @@ def recuperar():
         Usuario.correo == correo
     )
 
-    try:
-        enviar_correo(
-            correo,
-            "Recuperación de contraseña - Molino de Arroz",
-            f"Tu código de recuperación es: {codigo}. Este código expirará en 10 minutos."
-        )
-        return jsonify({"message": "Código de recuperación enviado al correo ✅"}), 200
-    except Exception as e:
-        return jsonify({"error": f"No se pudo enviar el correo: {str(e)}"}), 500
+    # Enviar correo en background
+    thread = threading.Thread(target=send_recovery_email, args=(correo, codigo), daemon=True)
+    thread.start()
 
+    return jsonify({"message": "Código de recuperación enviado al correo ✅"}), 200
 
 # ---------- VALIDAR CÓDIGO Y CAMBIAR CONTRASEÑA ----------
 @app.route('/reset-password', methods=['POST'])
@@ -106,16 +128,16 @@ def reset_password():
 
     return jsonify({"message": "Contraseña actualizada correctamente ✅"}), 200
 
-
 # Ruta de prueba para envío de correo (opcional)
 @app.route('/test-mail')
 def test_mail():
     try:
-        enviar_correo("destinatario@correo.com", "Prueba Flask", "Correo de prueba desde Flask.")
+        # Se puede probar con el mismo send_recovery_email para consistencia
+        thread = threading.Thread(target=send_recovery_email, args=("destinatario@correo.com", "123456"), daemon=True)
+        thread.start()
         return {"message": "Correo enviado correctamente ✅"}
     except Exception as e:
         return {"error": str(e)}, 500
-
 
 # ------------------- EJECUCIÓN -------------------
 if __name__ == "__main__":

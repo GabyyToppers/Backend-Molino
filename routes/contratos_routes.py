@@ -21,7 +21,12 @@ def generar_nuevo_id():
 # Obtener todos los contratos
 @contratos.route('/contratos', methods=['GET'])
 def get_contratos():
-    return jsonify(contratos_table.all()), 200
+    contratos = []
+    for item in contratos_table:
+        contrato = item.copy()
+        contrato['id'] = item.doc_id  # Agregar el doc_id como campo id
+        contratos.append(contrato)
+    return jsonify(contratos), 200
 
 
 # Crear contrato (relacionado con un empleado)
